@@ -19,6 +19,8 @@
 // You should have received a copy of the GNU General Public License
 // along with libSML.  If not, see <http://www.gnu.org/licenses/>.
 
+#define _POSIX_C_SOURCE 200809L
+#include <assert.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -31,6 +33,7 @@
 #include <string.h>
 #include <math.h>
 #include <sys/ioctl.h>
+#include <time.h>
 
 #include <sml/sml_file.h>
 #include <sml/sml_transport.h>
@@ -84,11 +87,18 @@ int serial_port_open(const char* device) {
 	return fd;
 }
 
+static char *output_file = "-";
+static int count = 0;
+static FILE *outf;
+static bool is_stdout;
+
 void transport_receiver(unsigned char *buffer, size_t buffer_len) {
 	int i;
 	// the buffer contains the whole message, with transport escape sequences.
 	// these escape sequences are stripped here.
 	sml_file *file = sml_file_parse(buffer + 8, buffer_len - 16);
+	struct timespec ts;
+	char *start = "{";
 	bool dzg_workaround = false;
 	// the sml file is parsed now
 
@@ -98,7 +108,11 @@ void transport_receiver(unsigned char *buffer, size_t buffer_len) {
 
 	// read here some values ...
 	if (vflag)
-		printf("OBIS data\n");
+		fprintf(outf, "OBIS data\n");
+	if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+		fprintf(outf, "%s\"ts\": %llu.%09ld", start, (unsigned long long)ts.tv_sec, ts.tv_nsec);
+		start = ", ";
+	}
 	for (i = 0; i < file->messages_len; i++) {
 		sml_message *message = file->messages[i];
 		if (*message->message_body->tag == SML_MESSAGE_GET_LIST_RESPONSE) {
@@ -115,11 +129,12 @@ void transport_receiver(unsigned char *buffer, size_t buffer_len) {
 					static const unsigned char dzg_serial_start[] =
 						{ 0x0a, 0x01, 'D', 'Z', 'G', 0x00, };
 					char *str;
-					printf("%d-%d:%d.%d.%d*%d#%s#\n",
+					fprintf(outf, "%s\"%d-%d:%d.%d.%d*%d\": \"%s\"", start,
 						entry->obj_name->str[0], entry->obj_name->str[1],
 						entry->obj_name->str[2], entry->obj_name->str[3],
 						entry->obj_name->str[4], entry->obj_name->str[5],
 						sml_value_to_strhex(entry->value, &str, true));
+					start = ", ";
 					free(str);
 					if (entry->value &&
 					    memcmp(entry->obj_name->str, dzg_serial_tag,
@@ -129,11 +144,12 @@ void transport_receiver(unsigned char *buffer, size_t buffer_len) {
 						   sizeof(dzg_serial_start)) == 0)
 						dzg_workaround = true;
 				} else if (entry->value->type == SML_TYPE_BOOLEAN) {
-					printf("%d-%d:%d.%d.%d*%d#%s#\n",
+					fprintf(outf, "%s\"%d-%d:%d.%d.%d*%d\": \"%s\"", start,
 						entry->obj_name->str[0], entry->obj_name->str[1],
 						entry->obj_name->str[2], entry->obj_name->str[3],
 						entry->obj_name->str[4], entry->obj_name->str[5],
 						entry->value->data.boolean ? "true" : "false");
+					start = ", ";
 				} else if (((entry->value->type & SML_TYPE_FIELD) == SML_TYPE_INTEGER) ||
 						((entry->value->type & SML_TYPE_FIELD) == SML_TYPE_UNSIGNED)) {
 					int value_len = entry->value->orig_data[0] & SML_LENGTH_FIELD;
@@ -179,18 +195,30 @@ void transport_receiver(unsigned char *buffer, size_t buffer_len) {
 					if (prec < 0)
 						prec = 0;
 					value = value * pow(10, scaler);
-					printf("%d-%d:%d.%d.%d*%d#%.*f#",
+					fprintf(outf, "%s\"%d-%d:%d.%d.%d*%d\": %.*f", start,
 						entry->obj_name->str[0], entry->obj_name->str[1],
 						entry->obj_name->str[2], entry->obj_name->str[3],
 						entry->obj_name->str[4], entry->obj_name->str[5], prec, value);
-					char *unit = NULL;
-					if (entry->unit &&  // do not crash on null (unit is optional)
-						(unit = dlms_get_unit((unsigned char) *entry->unit)) != NULL)
-						printf("%s", unit);
-					printf("\n");
-					// flush the stdout puffer, that pipes work without waiting
-					fflush(stdout);
+					start = ", ";
+//					char *unit = NULL;
+//					if (entry->unit &&  // do not crash on null (unit is optional)
+//						(unit = dlms_get_unit((unsigned char) *entry->unit)) != NULL)
+//						fprintf(outf, "%s", unit);
+				} else {
+					continue;
 				}
+			}
+			fprintf(outf, " }\n");
+			// flush the stdout puffer, that pipes work without waiting
+			fflush(outf);
+			count++;
+			if (!is_stdout && count == 60) {
+				char buf[4096];
+				count = 0;
+				sprintf(buf, "%s.%llu", output_file, (unsigned long long)time(NULL));
+				rename(output_file, buf);
+				outf = fopen(output_file, "a");
+				assert(outf);
 			}
 			if (sflag)
 				exit(0); // processed first message - exit
@@ -209,8 +237,9 @@ int main(int argc, char *argv[]) {
 	while ((c = getopt(argc, argv, "+hsv")) != -1) {
 		switch (c) {
 		case 'h':
-			printf("usage: %s [-h] [-s] [-v] device\n", argv[0]);
+			printf("usage: %s [-h] [-s] [-v] device outputfile\n", argv[0]);
 			printf("device - serial device of connected power meter e.g. /dev/cu.usbserial, or - for stdin\n");
+			printf("outputfile - output file, will be cycled to .<timestamp>, - for stdout\n");
 			printf("-h - help\n");
 			printf("-s - process only one OBIS data stream (single)\n");
 			printf("-v - verbose\n");
@@ -232,7 +261,7 @@ int main(int argc, char *argv[]) {
 		}
 	}
 
-	if (argc - optind != 1) {
+	if (argc - optind != 1 && argc - optind != 2) {
 		printf("error: Arguments mismatch.\nUse %s -h for help.\n", argv[0]);
 		exit(1); // exit here
 	}
@@ -243,6 +272,17 @@ int main(int argc, char *argv[]) {
 		// error message is printed by serial_port_open()
 		exit(1);
 	}
+
+	if (argc - optind == 2)
+		output_file = argv[optind + 1];
+
+	is_stdout = strcmp(output_file, "-") == 0;
+	if (is_stdout)
+		outf = stdout;
+	else
+		outf = fopen(output_file, "a");
+
+	assert(outf);
 
 	// listen on the serial device, this call is blocking.
 	sml_transport_listen(fd, &transport_receiver);
