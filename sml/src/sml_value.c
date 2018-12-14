@@ -32,6 +32,7 @@ sml_value *sml_value_parse(sml_buffer *buf) {
 
 	sml_value *value = sml_value_init();
 	value->type = type;
+	value->orig_data = buf->buffer + buf->cursor;
 
 	switch (type) {
 		case SML_TYPE_OCTET_STRING:

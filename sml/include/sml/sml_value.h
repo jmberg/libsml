@@ -31,6 +31,7 @@ extern "C" {
 
 typedef struct {
 	u8 type;
+	u8 *orig_data;
 	union {
 		sml_boolean *boolean;
 		octet_string *bytes; // can have zero length
