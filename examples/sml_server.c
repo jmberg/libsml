@@ -89,6 +89,7 @@ void transport_receiver(unsigned char *buffer, size_t buffer_len) {
 	// the buffer contains the whole message, with transport escape sequences.
 	// these escape sequences are stripped here.
 	sml_file *file = sml_file_parse(buffer + 8, buffer_len - 16);
+	bool dzg_workaround = false;
 	// the sml file is parsed now
 
 	// this prints some information about the file
@@ -110,6 +111,9 @@ void transport_receiver(unsigned char *buffer, size_t buffer_len) {
 					continue;
 				}
 				if (entry->value->type == SML_TYPE_OCTET_STRING) {
+					static const unsigned char dzg_serial_tag[] = { 1, 0, 96, 1, 0, 255 };
+					static const unsigned char dzg_serial_start[] =
+						{ 0x0a, 0x01, 'D', 'Z', 'G', 0x00, };
 					char *str;
 					printf("%d-%d:%d.%d.%d*%d#%s#\n",
 						entry->obj_name->str[0], entry->obj_name->str[1],
@@ -117,6 +121,13 @@ void transport_receiver(unsigned char *buffer, size_t buffer_len) {
 						entry->obj_name->str[4], entry->obj_name->str[5],
 						sml_value_to_strhex(entry->value, &str, true));
 					free(str);
+					if (entry->value &&
+					    memcmp(entry->obj_name->str, dzg_serial_tag,
+						   sizeof(dzg_serial_tag)) == 0 &&
+					    entry->value->data.bytes->len >= sizeof(dzg_serial_start) &&
+					    memcmp(entry->value->data.bytes->str, dzg_serial_start,
+						   sizeof(dzg_serial_start)) == 0)
+						dzg_workaround = true;
 				} else if (entry->value->type == SML_TYPE_BOOLEAN) {
 					printf("%d-%d:%d.%d.%d*%d#%s#\n",
 						entry->obj_name->str[0], entry->obj_name->str[1],
@@ -125,6 +136,43 @@ void transport_receiver(unsigned char *buffer, size_t buffer_len) {
 						entry->value->data.boolean ? "true" : "false");
 				} else if (((entry->value->type & SML_TYPE_FIELD) == SML_TYPE_INTEGER) ||
 						((entry->value->type & SML_TYPE_FIELD) == SML_TYPE_UNSIGNED)) {
+					int value_len = entry->value->orig_data[0] & SML_LENGTH_FIELD;
+
+					/*
+					 * Work around DZG meter - it encodes the consumption wrong:
+					 * The value uses a scaler of -2, so e.g. 328.05 should be
+					 * encoded as an unsigned int:
+					 *   63 80 25 (0x8025 == 32805 corresponds to 328.05W)
+					 * or as a signed int:
+					 *   64 00 80 25
+					 * but they encode it as
+					 *   53 80 25
+					 * which reads as -32731 corresponding to -327.31W.
+					 *
+					 * Luckily, it doesn't attempt to do any compression on
+					 * negative values, they're always encoded as, e.g.
+					 *   55 ff fe 13 93 (== -126061 -> -1260.61W)
+					 *
+					 * Since we cannot have positive values >= 0x80000000
+					 * (that would be 21474836.48 W, yes, >21MW), we can
+					 * assume that for 1, 2, 3 bytes, if they look signed,
+					 * they really were intended to be unsigned.
+					 *
+					 * Note that this will NOT work if a meter outputs negative
+					 * values compressed as well - but mine doesn't.
+					 */
+					if (dzg_workaround &&
+					    entry->obj_name->str[0] == 1 &&
+					    entry->obj_name->str[1] == 0 &&
+					    entry->obj_name->str[2] == 16 &&
+					    entry->obj_name->str[3] == 7 &&
+					    entry->obj_name->str[4] == 0 &&
+					    entry->obj_name->str[5] == 255 &&
+					    (value_len == 1 || value_len == 2 || value_len == 3)) {
+						entry->value->type &= ~SML_TYPE_FIELD;
+						entry->value->type |= SML_TYPE_UNSIGNED;
+					}
+
 					double value = sml_value_to_double(entry->value);
 					int scaler = (entry->scaler) ? *entry->scaler : 0;
 					int prec = -scaler;
