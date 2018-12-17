@@ -163,6 +163,9 @@ error:
 }
 
 sml_list *sml_list_parse(sml_buffer *buf) {
+	sml_list *ret = NULL, **pos = &ret;
+	int elems;
+
 	if (sml_buf_optional_is_skipped(buf)) {
 		return NULL;
 	}
@@ -172,31 +175,20 @@ sml_list *sml_list_parse(sml_buffer *buf) {
 		return NULL;
 	}
 
-	sml_list *first = 0;
-	sml_list *last = 0;
-	int elems;
-
 	elems = sml_buf_get_next_length(buf);
 
-	if (elems > 0) {
-		first = sml_list_entry_parse(buf);
+	while (elems > 0) {
+		*pos = sml_list_entry_parse(buf);
 		if (sml_buf_has_errors(buf)) goto error;
-		last = first;
+		pos = &(*pos)->next;
 		elems--;
 	}
 
-	while(elems > 0) {
-		last->next = sml_list_entry_parse(buf);
-		if (sml_buf_has_errors(buf)) goto error;
-		last = last->next;
-		elems--;
-	}
-
-	return first;
+	return ret;
 
 error:
 	buf->error = 1;
-	sml_list_free(first);
+	sml_list_free(ret);
 	return NULL;
 }
 
